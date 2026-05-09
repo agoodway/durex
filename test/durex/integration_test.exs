@@ -872,20 +872,41 @@ defmodule Durex.IntegrationTest do
       GenServer.stop(pid)
     end
 
-    test "emits [:durex, :restore, :failed] for store errors with recovery" do
+    test "emits [:durex, :restore, :ok] with recovered: true when store error is recovered" do
       ref =
         :telemetry_test.attach_event_handlers(self(), [
-          [:durex, :restore, :failed]
+          [:durex, :restore, :ok]
         ])
 
-      user_id = "telemetry_store_#{System.unique_integer([:positive])}"
+      user_id = "telemetry_store_recover_#{System.unique_integer([:positive])}"
 
       log =
         capture_log(fn ->
           {:ok, pid} = RecoveringFailingServer.start_link(user_id: user_id)
 
+          assert_received {[:durex, :restore, :ok], ^ref, %{},
+                           %{module: RecoveringFailingServer, found: false, recovered: true}}
+
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "Checkpoint read failed"
+    end
+
+    test "emits [:durex, :restore, :failed] when store error is not recovered" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:durex, :restore, :failed]
+        ])
+
+      user_id = "telemetry_store_fail_#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = FailingServer.start_link(user_id: user_id)
+
           assert_received {[:durex, :restore, :failed], ^ref, %{},
-                           %{module: RecoveringFailingServer, reason: :timeout}}
+                           %{module: FailingServer, reason: :timeout}}
 
           GenServer.stop(pid)
         end)

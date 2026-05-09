@@ -333,13 +333,6 @@ defmodule Durex do
 
       {:error, reason} ->
         Logger.warning("[Durex] Checkpoint read failed: #{inspect(reason)}")
-
-        :telemetry.execute(
-          [:durex, :restore, :failed],
-          %{},
-          %{module: module, reason: reason}
-        )
-
         handle_conflict(module, {:store_read_error, reason}, key)
     end
   end
@@ -348,12 +341,7 @@ defmodule Durex do
   defp handle_conflict(module, reason, key) do
     case module.restore_conflicted(reason, key, []) do
       nil ->
-        :telemetry.execute(
-          [:durex, :restore, :ok],
-          %{},
-          %{module: module, found: false, recovered: false}
-        )
-
+        emit_unrecovered_telemetry(module, reason)
         {:ok, nil}
 
       data when is_map(data) ->
@@ -369,6 +357,19 @@ defmodule Durex do
         raise ArgumentError,
               "restore_conflicted/3 must return a map or nil, got: #{inspect(other)}"
     end
+  end
+
+  @spec emit_unrecovered_telemetry(module(), restore_conflict_reason()) :: :ok
+  defp emit_unrecovered_telemetry(module, {:store_read_error, reason}) do
+    :telemetry.execute([:durex, :restore, :failed], %{}, %{module: module, reason: reason})
+  end
+
+  defp emit_unrecovered_telemetry(module, _reason) do
+    :telemetry.execute(
+      [:durex, :restore, :ok],
+      %{},
+      %{module: module, found: false, recovered: false}
+    )
   end
 
   @doc """
