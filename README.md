@@ -11,7 +11,7 @@ Add `durex` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:durex, "~> 0.1.0"}
+    {:durex, github: "agoodway/durex"}
   ]
 end
 ```
@@ -21,7 +21,7 @@ If you use `Durex.Store.Tigris`, also add `:req` because Durex declares it as an
 ```elixir
 def deps do
   [
-    {:durex, "~> 0.1.0"},
+    {:durex, github: "agoodway/durex"},
     {:req, "~> 0.5"}
   ]
 end
