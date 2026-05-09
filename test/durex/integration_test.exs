@@ -200,6 +200,234 @@ defmodule Durex.IntegrationTest do
     def checkpoint_key(_state), do: "test"
   end
 
+  defmodule RecoveringStore do
+    @moduledoc false
+    @behaviour Durex.Store
+
+    @impl Durex.Store
+    def write(key, payload, _opts) do
+      Agent.update(__MODULE__, &Map.put(&1, key, payload))
+      :ok
+    end
+
+    @impl Durex.Store
+    def read(key) do
+      case Agent.get(__MODULE__, &Map.get(&1, key)) do
+        nil -> {:ok, nil}
+        data -> {:ok, data}
+      end
+    end
+
+    @impl Durex.Store
+    def delete(key) do
+      Agent.update(__MODULE__, &Map.delete(&1, key))
+      :ok
+    end
+  end
+
+  defmodule RecoveringServer do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.IntegrationTest.RecoveringStore, interval: 5_000, version: 1
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts)
+    end
+
+    @impl GenServer
+    def init(opts) do
+      state = %{user_id: opts[:user_id], counter: 0}
+      state = Durex.start_sync(__MODULE__, state)
+
+      case Durex.maybe_restore(__MODULE__, state) do
+        {:ok, nil} -> {:ok, state}
+        {:ok, restored} -> {:ok, Map.merge(state, restored)}
+      end
+    end
+
+    @impl GenServer
+    def handle_call(:get_state, _from, state) do
+      {:reply, Map.delete(state, :__durex__), state}
+    end
+
+    @impl Durex
+    def restore_conflicted(:missing_checkpoint, _key, _opts), do: %{counter: 99}
+
+    def restore_conflicted({:version_mismatch, _expected, _actual}, _key, _opts),
+      do: %{counter: 77}
+
+    def restore_conflicted({:invalid_envelope, _decoded}, _key, _opts), do: %{counter: 66}
+    def restore_conflicted({:corrupted_json, _reason}, _key, _opts), do: %{counter: 55}
+    def restore_conflicted({:store_read_error, _reason}, _key, _opts), do: %{counter: 44}
+
+    @impl Durex
+    def serialize(state), do: Map.take(state, [:user_id, :counter])
+
+    @impl Durex
+    def deserialize(data) do
+      Map.new(data, fn {k, v} -> {String.to_existing_atom(k), v} end)
+    end
+
+    @impl Durex
+    def checkpoint_key(state), do: state.user_id
+  end
+
+  defmodule NilRecoveringServer do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.IntegrationTest.RecoveringStore, interval: 5_000, version: 1
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl GenServer
+    def init(opts) do
+      state = %{user_id: opts[:user_id], counter: 0}
+      state = Durex.start_sync(__MODULE__, state)
+
+      case Durex.maybe_restore(__MODULE__, state) do
+        {:ok, nil} -> {:ok, state}
+        {:ok, restored} -> {:ok, Map.merge(state, restored)}
+      end
+    end
+
+    @impl GenServer
+    def handle_call(:get_state, _from, state) do
+      {:reply, Map.delete(state, :__durex__), state}
+    end
+
+    @impl Durex
+    def restore_conflicted(_reason, _key, _opts), do: nil
+
+    @impl Durex
+    def serialize(state), do: Map.take(state, [:user_id, :counter])
+
+    @impl Durex
+    def deserialize(data) do
+      Map.new(data, fn {k, v} -> {String.to_existing_atom(k), v} end)
+    end
+
+    @impl Durex
+    def checkpoint_key(state), do: state.user_id
+  end
+
+  defmodule BadReturnServer do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.IntegrationTest.RecoveringStore, interval: 5_000, version: 1
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl GenServer
+    def init(opts) do
+      state = %{user_id: opts[:user_id], counter: 0}
+      state = Durex.start_sync(__MODULE__, state)
+
+      case Durex.maybe_restore(__MODULE__, state) do
+        {:ok, nil} -> {:ok, state}
+        {:ok, restored} -> {:ok, Map.merge(state, restored)}
+      end
+    end
+
+    @impl Durex
+    def restore_conflicted(_reason, _key, _opts), do: :bad_value
+
+    @impl Durex
+    def serialize(state), do: Map.take(state, [:user_id, :counter])
+
+    @impl Durex
+    def deserialize(data) do
+      Map.new(data, fn {k, v} -> {String.to_existing_atom(k), v} end)
+    end
+
+    @impl Durex
+    def checkpoint_key(state), do: state.user_id
+  end
+
+  defmodule KeyCapturingServer do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.IntegrationTest.RecoveringStore, interval: 5_000, version: 1
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl GenServer
+    def init(opts) do
+      Process.put(:test_pid, opts[:test_pid])
+      state = %{user_id: opts[:user_id], counter: 0}
+      state = Durex.start_sync(__MODULE__, state)
+
+      case Durex.maybe_restore(__MODULE__, state) do
+        {:ok, nil} -> {:ok, state}
+        {:ok, restored} -> {:ok, Map.merge(state, restored)}
+      end
+    end
+
+    @impl GenServer
+    def handle_call(:get_state, _from, state) do
+      {:reply, Map.delete(state, :__durex__), state}
+    end
+
+    @impl Durex
+    def restore_conflicted(reason, key, opts) do
+      case Process.get(:test_pid) do
+        pid when is_pid(pid) -> send(pid, {:captured_args, reason, key, opts})
+        _ -> :ok
+      end
+
+      nil
+    end
+
+    @impl Durex
+    def serialize(state), do: Map.take(state, [:user_id, :counter])
+
+    @impl Durex
+    def deserialize(data) do
+      Map.new(data, fn {k, v} -> {String.to_existing_atom(k), v} end)
+    end
+
+    @impl Durex
+    def checkpoint_key(state), do: state.user_id
+  end
+
+  defmodule RecoveringFailingServer do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.IntegrationTest.FailingStore, interval: 5_000, version: 1
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl GenServer
+    def init(opts) do
+      state = %{user_id: opts[:user_id], counter: 0}
+      state = Durex.start_sync(__MODULE__, state)
+
+      case Durex.maybe_restore(__MODULE__, state) do
+        {:ok, nil} -> {:ok, state}
+        {:ok, restored} -> {:ok, Map.merge(state, restored)}
+      end
+    end
+
+    @impl GenServer
+    def handle_call(:get_state, _from, state) do
+      {:reply, Map.delete(state, :__durex__), state}
+    end
+
+    @impl Durex
+    def restore_conflicted({:store_read_error, _reason}, _key, _opts), do: %{counter: 44}
+    def restore_conflicted(_reason, _key, _opts), do: nil
+
+    @impl Durex
+    def serialize(state), do: Map.take(state, [:user_id, :counter])
+
+    @impl Durex
+    def deserialize(data) do
+      Map.new(data, fn {k, v} -> {String.to_existing_atom(k), v} end)
+    end
+
+    @impl Durex
+    def checkpoint_key(state), do: state.user_id
+  end
+
   defmodule TestServerV2 do
     @moduledoc false
     use GenServer
@@ -469,6 +697,221 @@ defmodule Durex.IntegrationTest do
       assert {:error, :connection_not_configured} = Store.Redis.read("some_key")
       assert {:error, :connection_not_configured} = Store.Redis.write("some_key", "val")
       assert {:error, :connection_not_configured} = Store.Redis.delete("some_key")
+    end
+  end
+
+  describe "restore_conflicted callback" do
+    setup do
+      start_supervised!(%{
+        id: RecoveringStore,
+        start: {Agent, :start_link, [fn -> %{} end, [name: RecoveringStore]]}
+      })
+
+      :ok
+    end
+
+    test "callback recovers from missing checkpoint" do
+      user_id = "recover_missing_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} = RecoveringServer.start_link(user_id: user_id)
+      state = GenServer.call(pid, :get_state)
+      assert state.counter == 99
+      GenServer.stop(pid)
+    end
+
+    test "callback recovers from version mismatch" do
+      user_id = "recover_version_#{System.unique_integer([:positive])}"
+      key = Durex.Key.build(RecoveringServer, user_id)
+      payload = Jason.encode!(%{"v" => 999, "d" => %{"user_id" => user_id, "counter" => 1}})
+      Agent.update(RecoveringStore, &Map.put(&1, key, payload))
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = RecoveringServer.start_link(user_id: user_id)
+          state = GenServer.call(pid, :get_state)
+          assert state.counter == 77
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "Version mismatch"
+    end
+
+    test "callback recovers from invalid envelope" do
+      user_id = "recover_envelope_#{System.unique_integer([:positive])}"
+      key = Durex.Key.build(RecoveringServer, user_id)
+      payload = Jason.encode!(%{"bad" => "envelope"})
+      Agent.update(RecoveringStore, &Map.put(&1, key, payload))
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = RecoveringServer.start_link(user_id: user_id)
+          state = GenServer.call(pid, :get_state)
+          assert state.counter == 66
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "invalid envelope"
+    end
+
+    test "callback recovers from corrupted JSON" do
+      user_id = "recover_json_#{System.unique_integer([:positive])}"
+      key = Durex.Key.build(RecoveringServer, user_id)
+      Agent.update(RecoveringStore, &Map.put(&1, key, "not valid json{{{"))
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = RecoveringServer.start_link(user_id: user_id)
+          state = GenServer.call(pid, :get_state)
+          assert state.counter == 55
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "Failed to decode"
+    end
+
+    test "callback nil returns preserve {:ok, nil}" do
+      user_id = "nil_recover_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} = NilRecoveringServer.start_link(user_id: user_id)
+      state = GenServer.call(pid, :get_state)
+      assert state.counter == 0
+      GenServer.stop(pid)
+    end
+
+    test "callback recovers from store read errors" do
+      user_id = "recover_store_#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = RecoveringFailingServer.start_link(user_id: user_id)
+          state = GenServer.call(pid, :get_state)
+          assert state.counter == 44
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "Checkpoint read failed"
+    end
+
+    test "non-map non-nil callback returns raise ArgumentError" do
+      user_id = "bad_return_#{System.unique_integer([:positive])}"
+      Process.flag(:trap_exit, true)
+
+      {:error, {%ArgumentError{message: msg}, _}} =
+        BadReturnServer.start_link(user_id: user_id)
+
+      assert msg =~ "must return a map or nil"
+    end
+
+    test "callback receives fully built key and [] opts" do
+      user_id = "key_capture_#{System.unique_integer([:positive])}"
+      expected_key = Durex.Key.build(KeyCapturingServer, user_id)
+
+      {:ok, pid} = KeyCapturingServer.start_link(user_id: user_id, test_pid: self())
+
+      assert_receive {:captured_args, reason, key, opts}, 1_000
+      assert reason == :missing_checkpoint
+      assert key == expected_key
+      assert opts == []
+
+      GenServer.stop(pid)
+    end
+  end
+
+  describe "backward compatibility" do
+    test "modules without custom restore_conflicted/3 still work" do
+      user_id = "compat_#{System.unique_integer([:positive])}"
+      {:ok, pid} = TestServer.start_link(user_id: user_id)
+
+      state = GenServer.call(pid, :get_state)
+      assert state.counter == 0
+      GenServer.stop(pid)
+    end
+  end
+
+  describe "telemetry with restore_conflicted" do
+    setup do
+      start_supervised!(%{
+        id: RecoveringStore,
+        start: {Agent, :start_link, [fn -> %{} end, [name: RecoveringStore]]}
+      })
+
+      :ok
+    end
+
+    test "emits [:durex, :restore, :ok] with found: false for recovered conflicts" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:durex, :restore, :ok]
+        ])
+
+      user_id = "telemetry_recover_#{System.unique_integer([:positive])}"
+      {:ok, pid} = RecoveringServer.start_link(user_id: user_id)
+
+      assert_received {[:durex, :restore, :ok], ^ref, %{},
+                       %{module: RecoveringServer, found: false, recovered: true}}
+
+      GenServer.stop(pid)
+    end
+
+    test "emits [:durex, :restore, :ok] with found: true for successful restore" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:durex, :restore, :ok]
+        ])
+
+      user_id = "telemetry_found_#{System.unique_integer([:positive])}"
+      key = Durex.Key.build(RecoveringServer, user_id)
+      payload = Jason.encode!(%{"v" => 1, "d" => %{"user_id" => user_id, "counter" => 42}})
+      Agent.update(RecoveringStore, &Map.put(&1, key, payload))
+
+      {:ok, pid} = RecoveringServer.start_link(user_id: user_id)
+
+      assert_received {[:durex, :restore, :ok], ^ref, %{},
+                       %{module: RecoveringServer, found: true, recovered: false}}
+
+      GenServer.stop(pid)
+    end
+
+    test "emits [:durex, :restore, :ok] with recovered: true when store error is recovered" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:durex, :restore, :ok]
+        ])
+
+      user_id = "telemetry_store_recover_#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = RecoveringFailingServer.start_link(user_id: user_id)
+
+          assert_received {[:durex, :restore, :ok], ^ref, %{},
+                           %{module: RecoveringFailingServer, found: false, recovered: true}}
+
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "Checkpoint read failed"
+    end
+
+    test "emits [:durex, :restore, :failed] when store error is not recovered" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:durex, :restore, :failed]
+        ])
+
+      user_id = "telemetry_store_fail_#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = FailingServer.start_link(user_id: user_id)
+
+          assert_received {[:durex, :restore, :failed], ^ref, %{},
+                           %{module: FailingServer, reason: :timeout}}
+
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "Checkpoint read failed"
     end
   end
 

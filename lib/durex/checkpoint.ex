@@ -45,15 +45,34 @@ defmodule Durex.Checkpoint do
   Decodes a JSON envelope and checks the version tag.
 
   Returns `{:ok, map}` if version matches, `{:ok, nil}` if version mismatches
-  or data is missing/corrupted.
+  or data is missing/corrupted. Delegates to `decode_detailed/2` internally.
   """
   @spec decode(binary() | nil, pos_integer()) :: {:ok, map() | nil}
-  def decode(nil, _version), do: {:ok, nil}
+  def decode(binary, version) do
+    case decode_detailed(binary, version) do
+      {:ok, data} -> {:ok, data}
+      {:conflict, _reason} -> {:ok, nil}
+    end
+  end
 
-  def decode(binary, version) when is_binary(binary) do
+  @doc """
+  Decodes a JSON envelope and returns structured conflict reasons instead of `{:ok, nil}`.
+
+  Returns `{:ok, data}` when the version matches and data is valid, or
+  `{:conflict, reason}` describing why the checkpoint cannot be used.
+  """
+  @spec decode_detailed(binary() | nil, pos_integer()) ::
+          {:ok, map()} | {:conflict, Durex.restore_conflict_reason()}
+  def decode_detailed(nil, _version), do: {:conflict, :missing_checkpoint}
+
+  def decode_detailed(binary, version) when is_binary(binary) do
     case Jason.decode(binary) do
       {:ok, %{"v" => ^version, "d" => data}} when is_map(data) ->
         {:ok, data}
+
+      {:ok, %{"v" => ^version, "d" => _non_map}} = {:ok, decoded} ->
+        Logger.warning("[Durex] Stored checkpoint has invalid envelope format. Discarding.")
+        {:conflict, {:invalid_envelope, decoded}}
 
       {:ok, %{"v" => stored_version, "d" => _data}} ->
         Logger.warning(
@@ -61,15 +80,15 @@ defmodule Durex.Checkpoint do
             "Discarding stale checkpoint."
         )
 
-        {:ok, nil}
+        {:conflict, {:version_mismatch, version, stored_version}}
 
-      {:ok, _data} ->
+      {:ok, decoded} ->
         Logger.warning("[Durex] Stored checkpoint has invalid envelope format. Discarding.")
-        {:ok, nil}
+        {:conflict, {:invalid_envelope, decoded}}
 
-      {:error, _reason} ->
+      {:error, reason} ->
         Logger.warning("[Durex] Failed to decode checkpoint JSON. Discarding corrupted data.")
-        {:ok, nil}
+        {:conflict, {:corrupted_json, reason}}
     end
   end
 
