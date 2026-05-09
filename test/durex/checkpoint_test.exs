@@ -122,4 +122,61 @@ defmodule Durex.CheckpointTest do
       assert {:ok, nil} = Checkpoint.decode(nil, 1)
     end
   end
+
+  describe "decode_detailed/2" do
+    test "returns {:ok, data} for valid envelope with matching version" do
+      payload = Jason.encode!(%{"v" => 1, "d" => %{"count" => 42}})
+      assert {:ok, %{"count" => 42}} = Checkpoint.decode_detailed(payload, 1)
+    end
+
+    test "returns {:conflict, :missing_checkpoint} for nil input" do
+      assert {:conflict, :missing_checkpoint} = Checkpoint.decode_detailed(nil, 1)
+    end
+
+    test "returns {:conflict, {:version_mismatch, expected, actual}} for version mismatch" do
+      payload = Jason.encode!(%{"v" => 1, "d" => %{"count" => 42}})
+
+      {result, log} =
+        with_log(fn ->
+          Checkpoint.decode_detailed(payload, 2)
+        end)
+
+      assert {:conflict, {:version_mismatch, 2, 1}} = result
+      assert log =~ "Version mismatch"
+    end
+
+    test "returns {:conflict, {:invalid_envelope, decoded}} for missing envelope keys" do
+      payload = Jason.encode!(%{"count" => 42})
+
+      {result, log} =
+        with_log(fn ->
+          Checkpoint.decode_detailed(payload, 1)
+        end)
+
+      assert {:conflict, {:invalid_envelope, %{"count" => 42}}} = result
+      assert log =~ "invalid envelope"
+    end
+
+    test "returns {:conflict, {:invalid_envelope, decoded}} for matching version with non-map data" do
+      payload = Jason.encode!(%{"v" => 1, "d" => "not_a_map"})
+
+      {result, log} =
+        with_log(fn ->
+          Checkpoint.decode_detailed(payload, 1)
+        end)
+
+      assert {:conflict, {:invalid_envelope, _decoded}} = result
+      assert log =~ "invalid envelope"
+    end
+
+    test "returns {:conflict, {:corrupted_json, reason}} for invalid JSON" do
+      {result, log} =
+        with_log(fn ->
+          Checkpoint.decode_detailed("not json{{{", 1)
+        end)
+
+      assert {:conflict, {:corrupted_json, _reason}} = result
+      assert log =~ "Failed to decode"
+    end
+  end
 end

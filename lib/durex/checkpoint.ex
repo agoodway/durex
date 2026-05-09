@@ -73,6 +73,43 @@ defmodule Durex.Checkpoint do
     end
   end
 
+  @doc """
+  Decodes a JSON envelope and returns structured conflict reasons instead of `{:ok, nil}`.
+
+  Returns `{:ok, data}` when the version matches and data is valid, or
+  `{:conflict, reason}` describing why the checkpoint cannot be used.
+  """
+  @spec decode_detailed(binary() | nil, pos_integer()) ::
+          {:ok, map()} | {:conflict, Durex.restore_conflict_reason()}
+  def decode_detailed(nil, _version), do: {:conflict, :missing_checkpoint}
+
+  def decode_detailed(binary, version) when is_binary(binary) do
+    case Jason.decode(binary) do
+      {:ok, %{"v" => ^version, "d" => data}} when is_map(data) ->
+        {:ok, data}
+
+      {:ok, %{"v" => ^version, "d" => _non_map}} = {:ok, decoded} ->
+        Logger.warning("[Durex] Stored checkpoint has invalid envelope format. Discarding.")
+        {:conflict, {:invalid_envelope, decoded}}
+
+      {:ok, %{"v" => stored_version, "d" => _data}} ->
+        Logger.warning(
+          "[Durex] Version mismatch: stored=#{stored_version}, expected=#{version}. " <>
+            "Discarding stale checkpoint."
+        )
+
+        {:conflict, {:version_mismatch, version, stored_version}}
+
+      {:ok, decoded} ->
+        Logger.warning("[Durex] Stored checkpoint has invalid envelope format. Discarding.")
+        {:conflict, {:invalid_envelope, decoded}}
+
+      {:error, reason} ->
+        Logger.warning("[Durex] Failed to decode checkpoint JSON. Discarding corrupted data.")
+        {:conflict, {:corrupted_json, reason}}
+    end
+  end
+
   @spec max_payload_bytes() :: pos_integer()
   defp max_payload_bytes do
     value = Application.get_env(:durex, :max_payload_bytes, @default_max_payload_bytes)

@@ -89,6 +89,36 @@ defmodule Durex do
   """
   @callback checkpoint_key(state :: map()) :: String.t()
 
+  @typedoc """
+  Structured reason describing why a checkpoint restore could not produce data.
+
+  - `:missing_checkpoint` — no checkpoint exists for the key.
+  - `{:version_mismatch, expected, actual}` — stored version differs from the module's configured version.
+  - `{:invalid_envelope, decoded}` — stored JSON doesn't match the `%{"v" => _, "d" => _}` envelope.
+  - `{:corrupted_json, reason}` — stored binary is not valid JSON.
+  - `{:store_read_error, reason}` — the store returned an error during read.
+  """
+  @type restore_conflict_reason ::
+          :missing_checkpoint
+          | {:version_mismatch, expected :: pos_integer(), actual :: term()}
+          | {:invalid_envelope, term()}
+          | {:corrupted_json, term()}
+          | {:store_read_error, term()}
+
+  @doc """
+  Called when a checkpoint restore encounters a conflict.
+
+  Receives the conflict reason, the fully built checkpoint key, and an options
+  keyword list (currently always `[]`). Return a map to recover with that data,
+  or `nil` to preserve the default `{:ok, nil}` behavior.
+
+  The default implementation injected by `use Durex` returns `nil`.
+  """
+  @callback restore_conflicted(restore_conflict_reason(), key :: String.t(), opts :: keyword()) ::
+              map() | nil
+
+  @optional_callbacks restore_conflicted: 3
+
   defmacro __using__(opts) do
     store = Keyword.get(opts, :store) || raise ArgumentError, "use Durex requires :store option"
     interval = Keyword.get(opts, :interval, 30_000)
@@ -117,6 +147,13 @@ defmodule Durex do
       @__durex_interval__ unquote(interval)
       @__durex_ttl__ unquote(ttl)
       @__durex_version__ unquote(version)
+
+      @impl Durex
+      @spec restore_conflicted(Durex.restore_conflict_reason(), String.t(), keyword()) ::
+              map() | nil
+      def restore_conflicted(_reason, _key, _opts), do: nil
+
+      defoverridable restore_conflicted: 3
 
       @doc false
       @spec __durex_config__() :: keyword()
@@ -258,19 +295,15 @@ defmodule Durex do
     key = Durex.Key.build(module, module.checkpoint_key(clean_state))
 
     case store.read(key) do
-      {:ok, nil} ->
-        :telemetry.execute([:durex, :restore, :ok], %{}, %{module: module, found: false})
-        {:ok, nil}
-
       {:ok, binary} ->
-        case Durex.Checkpoint.decode(binary, version) do
-          {:ok, nil} ->
-            :telemetry.execute([:durex, :restore, :ok], %{}, %{module: module, found: false})
-            {:ok, nil}
-
+        case Durex.Checkpoint.decode_detailed(binary, version) do
           {:ok, data} ->
             :telemetry.execute([:durex, :restore, :ok], %{}, %{module: module, found: true})
             {:ok, module.deserialize(data)}
+
+          {:conflict, reason} ->
+            :telemetry.execute([:durex, :restore, :ok], %{}, %{module: module, found: false})
+            handle_conflict(module, reason, key)
         end
 
       {:error, reason} ->
@@ -282,7 +315,27 @@ defmodule Durex do
           %{module: module, reason: reason}
         )
 
+        handle_conflict(module, {:store_read_error, reason}, key)
+    end
+  end
+
+  @spec handle_conflict(module(), restore_conflict_reason(), String.t()) :: {:ok, map() | nil}
+  defp handle_conflict(module, reason, key) do
+    result =
+      if function_exported?(module, :restore_conflicted, 3) do
+        module.restore_conflicted(reason, key, [])
+      end
+
+    case result do
+      nil ->
         {:ok, nil}
+
+      data when is_map(data) ->
+        {:ok, data}
+
+      other ->
+        raise ArgumentError,
+              "restore_conflicted/3 must return a map or nil, got: #{inspect(other)}"
     end
   end
 

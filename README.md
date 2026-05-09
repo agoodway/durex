@@ -223,6 +223,40 @@ defmodule MyApp.DurexTelemetry do
 end
 ```
 
+### Recovering from Restore Conflicts
+
+By default, `maybe_restore/2` returns `{:ok, nil}` when a checkpoint is missing, has a version mismatch, is corrupted, or can't be read from the store. You can override `restore_conflicted/3` to recover from these cases:
+
+```elixir
+@impl Durex
+def restore_conflicted(:missing_checkpoint, _key, _opts) do
+  # Rebuild state from database when no checkpoint exists
+  %{counter: MyApp.Repo.get_counter()}
+end
+
+def restore_conflicted({:version_mismatch, _expected, _actual}, _key, _opts) do
+  # Migrate from older checkpoint format
+  %{counter: 0, migrated: true}
+end
+
+def restore_conflicted(_reason, _key, _opts) do
+  # For other conflicts, preserve default nil behavior
+  nil
+end
+```
+
+Return a map to recover with that data, or `nil` to keep the default `{:ok, nil}` behavior. Non-map, non-nil returns raise `ArgumentError`.
+
+#### Conflict Reasons
+
+| Reason | When |
+|---|---|
+| `:missing_checkpoint` | No checkpoint exists for the key |
+| `{:version_mismatch, expected, actual}` | Stored version differs from module's configured version |
+| `{:invalid_envelope, decoded}` | Stored JSON doesn't match the `%{"v" => _, "d" => _}` envelope |
+| `{:corrupted_json, reason}` | Stored binary is not valid JSON |
+| `{:store_read_error, reason}` | The store returned an error during read |
+
 ## Callbacks
 
 | Callback | Purpose |
@@ -230,6 +264,7 @@ end
 | `serialize/1` | Convert state to a map for storage. The `__durex__` key is already stripped. |
 | `deserialize/1` | Convert stored map back for merging into state. JSON round-trips atom keys to strings — use `String.to_existing_atom/1` to convert back (never `String.to_atom/1`). |
 | `checkpoint_key/1` | Return a non-empty string identifying this process instance (e.g., a session ID). Receives state with `__durex__` stripped. |
+| `restore_conflicted/3` | *(optional)* Called when restore encounters a conflict. Return a map to recover, or `nil` to preserve default behavior. Default returns `nil`. |
 
 ## Options
 
@@ -249,8 +284,8 @@ Durex emits telemetry events that you can attach to for monitoring:
 | `[:durex, :checkpoint, :write]` | Successful checkpoint write (includes `:duration`) |
 | `[:durex, :checkpoint, :write_failed]` | Store returned an error (includes `:reason`) |
 | `[:durex, :checkpoint, :skipped]` | Payload too large or encode failed (includes `:reason`) |
-| `[:durex, :restore, :ok]` | Restore completed (includes `:found` boolean) |
-| `[:durex, :restore, :failed]` | Store error during restore (includes `:reason`) |
+| `[:durex, :restore, :ok]` | Restore completed (includes `:found` boolean). Conflicts emit `found: false` even when `restore_conflicted/3` recovers data. |
+| `[:durex, :restore, :failed]` | Store error during restore (includes `:reason`). `restore_conflicted/3` is still called after this event. |
 
 ## Constraints
 
