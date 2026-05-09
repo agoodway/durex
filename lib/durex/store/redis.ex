@@ -10,6 +10,8 @@ defmodule Durex.Store.Redis do
 
   @behaviour Durex.Store
 
+  @compile {:no_warn_undefined, Redix}
+
   @impl Durex.Store
   @spec write(String.t(), binary(), keyword()) :: :ok | {:error, term()}
   def write(key, payload, opts \\ []) do

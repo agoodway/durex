@@ -11,7 +11,7 @@
         excluded: [~r"/_build/", ~r"/deps/"]
       },
       plugins: [],
-      requires: ["deps/ex_dna/lib/ex_dna/integrations/credo.ex"],
+      requires: [],
       strict: true,
       parse_timeout: 5000,
       color: true,
