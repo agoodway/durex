@@ -34,6 +34,7 @@ defmodule Durex.MixProject do
     [
       {:jason, "~> 1.4"},
       {:redix, "~> 1.5", optional: true},
+      {:req, "~> 0.5", optional: true},
 
       # Code Quality
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

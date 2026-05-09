@@ -16,6 +16,17 @@ def deps do
 end
 ```
 
+If you use `Durex.Store.Tigris`, also add `:req` because Durex declares it as an optional dependency:
+
+```elixir
+def deps do
+  [
+    {:durex, "~> 0.1.0"},
+    {:req, "~> 0.5"}
+  ]
+end
+```
+
 ## Configuration
 
 ```elixir
@@ -25,9 +36,20 @@ config :durex, :app_name, :my_app
 config :durex, Durex.Store.Redis,
   connection: MyApp.Redis  # Named Redix process started by your app
 
+# Optional Tigris object storage backend
+config :durex, Durex.Store.Tigris,
+  bucket: "my-bucket",
+  access_key_id: "tid_xxx",
+  secret_access_key: "tsec_xxx",
+  prefix: "checkpoints"
+
 # Optional: custom max payload size (default 1MB)
 # config :durex, :max_payload_bytes, 2_097_152
 ```
+
+For production, source Tigris credentials from your host application's `runtime.exs` or equivalent runtime configuration. Required keys are `:bucket`, `:access_key_id`, and `:secret_access_key`. Optional keys are `:endpoint` (defaults to `"https://t3.storage.dev"`), `:region` (defaults to `"auto"`), `:prefix`, and advanced `:req_options` for safe transport options such as `:adapter`, `:connect_options`, `:receive_timeout`, and `:pool_timeout`.
+
+Tigris endpoints must be HTTPS origin URLs with a scheme, host, and optional port only, such as `"https://objects.example.com:8443"`. Paths, query strings, fragments, userinfo, and plain HTTP endpoints are rejected. Bucket names must be DNS-compatible because they are used in virtual-hosted object URLs.
 
 ## Redis Connection Ownership
 
@@ -39,6 +61,12 @@ children = [
   {Redix, name: MyApp.Redis, host: "localhost"}
 ]
 ```
+
+## Redis Versus Tigris
+
+Use `Durex.Store.Redis` for low-latency hot recovery when your application already owns a Redis connection. Use `Durex.Store.Tigris` when you want durable object-backed checkpointing and can tolerate object storage latency.
+
+Tigris stores checkpoint payloads as raw object bodies. When you pass `ttl: seconds`, Durex writes an `x-amz-meta-durex-expires-at` metadata value and treats expired objects as missing on read. Expired objects are not physically deleted by Durex, so configure Tigris lifecycle cleanup for high-churn workloads.
 
 ## Usage
 
@@ -84,6 +112,114 @@ defmodule MyApp.SessionServer do
 
   @impl Durex
   def checkpoint_key(state), do: state.session_id
+end
+```
+
+### Force an Immediate Sync
+
+Call `Durex.checkpoint/2` directly to write state to the store without waiting for the next periodic tick:
+
+```elixir
+def handle_call(:force_sync, _from, state) do
+  Durex.checkpoint(__MODULE__, state)
+  {:reply, :ok, state}
+end
+```
+
+### Delete a Checkpoint
+
+Remove a stored checkpoint when the process is done and no longer needs crash recovery:
+
+```elixir
+def handle_call(:finish, _from, state) do
+  Durex.delete(__MODULE__, state)
+  {:reply, :ok, state}
+end
+```
+
+### Version Bumping
+
+When your serialization format changes, bump the `:version` option. Durex will discard any stale checkpoints written with an older version and log a warning:
+
+```elixir
+# Before: stored checkpoints have version 1
+use Durex, store: Durex.Store.Redis, version: 1
+
+# After: bump to version 2, old checkpoints are ignored on restore
+use Durex, store: Durex.Store.Redis, version: 2
+```
+
+### Custom Store Backend
+
+Implement the `Durex.Store` behaviour to use any storage backend:
+
+```elixir
+defmodule MyApp.Store.S3 do
+  @behaviour Durex.Store
+
+  @impl Durex.Store
+  def write(key, payload, opts) do
+    ttl = Keyword.get(opts, :ttl)
+    # write payload to S3...
+    :ok
+  end
+
+  @impl Durex.Store
+  def read(key) do
+    # read from S3, return {:ok, binary} or {:ok, nil}
+  end
+
+  @impl Durex.Store
+  def delete(key) do
+    # delete from S3...
+    :ok
+  end
+end
+```
+
+Then reference it in your GenServer:
+
+```elixir
+use Durex, store: MyApp.Store.S3, interval: 60_000, ttl: 3600
+```
+
+### Observing Telemetry
+
+Attach to Durex telemetry events for monitoring and alerting:
+
+```elixir
+# In your application startup
+:telemetry.attach_many(
+  "durex-logger",
+  [
+    [:durex, :checkpoint, :write],
+    [:durex, :checkpoint, :write_failed],
+    [:durex, :checkpoint, :skipped],
+    [:durex, :restore, :ok],
+    [:durex, :restore, :failed]
+  ],
+  &MyApp.DurexTelemetry.handle_event/4,
+  nil
+)
+```
+
+```elixir
+defmodule MyApp.DurexTelemetry do
+  require Logger
+
+  def handle_event([:durex, :checkpoint, :write], %{duration: duration}, %{module: mod}, _config) do
+    Logger.info("[Durex] #{inspect(mod)} checkpoint wrote in #{System.convert_time_unit(duration, :native, :millisecond)}ms")
+  end
+
+  def handle_event([:durex, :checkpoint, :write_failed], _measurements, %{module: mod, reason: reason}, _config) do
+    Logger.error("[Durex] #{inspect(mod)} checkpoint write failed: #{inspect(reason)}")
+  end
+
+  def handle_event([:durex, :restore, :ok], _measurements, %{module: mod, found: found?}, _config) do
+    Logger.info("[Durex] #{inspect(mod)} restore: found=#{found?}")
+  end
+
+  def handle_event(_event, _measurements, _metadata, _config), do: :ok
 end
 ```
 

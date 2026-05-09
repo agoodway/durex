@@ -63,6 +63,59 @@ defmodule Durex.IntegrationTest do
     def checkpoint_key(state), do: state.user_id
   end
 
+  defmodule TestServerTigris do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.Store.Tigris, interval: 5_000, ttl: 60, version: 1
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts)
+    end
+
+    @impl GenServer
+    def init(opts) do
+      state = %{user_id: opts[:user_id], counter: 0}
+      state = Durex.start_sync(__MODULE__, state)
+
+      case Durex.maybe_restore(__MODULE__, state) do
+        {:ok, nil} -> {:ok, state}
+        {:ok, restored} -> {:ok, Map.merge(state, restored)}
+      end
+    end
+
+    @impl GenServer
+    def handle_call(:get_state, _from, state) do
+      {:reply, Map.delete(state, :__durex__), state}
+    end
+
+    @impl GenServer
+    def handle_call(:get_full_state, _from, state) do
+      {:reply, state, state}
+    end
+
+    @impl GenServer
+    def handle_call({:set_counter, n}, _from, state) do
+      {:reply, :ok, %{state | counter: n}}
+    end
+
+    @impl GenServer
+    def handle_call(:trigger_sync, _from, state) do
+      Durex.checkpoint(__MODULE__, state)
+      {:reply, :ok, state}
+    end
+
+    @impl Durex
+    def serialize(state), do: Map.take(state, [:user_id, :counter])
+
+    @impl Durex
+    def deserialize(data) do
+      Map.new(data, fn {k, v} -> {String.to_existing_atom(k), v} end)
+    end
+
+    @impl Durex
+    def checkpoint_key(state), do: state.user_id
+  end
+
   defmodule FailingStore do
     @moduledoc false
     @behaviour Durex.Store
@@ -219,6 +272,42 @@ defmodule Durex.IntegrationTest do
       assert state2.counter == 42
 
       GenServer.stop(pid2)
+    end
+  end
+
+  describe "tigris lifecycle" do
+    test "checkpoint, restore, and delete use the Tigris store contract" do
+      {:ok, object_store} = Agent.start_link(fn -> %{} end)
+
+      Application.put_env(:durex, Durex.Store.Tigris,
+        bucket: "my-bucket",
+        access_key_id: "test-access-key",
+        secret_access_key: "test-secret-key",
+        req_options: [adapter: tigris_adapter(object_store)]
+      )
+
+      user_id = "tigris_#{System.unique_integer([:positive])}"
+      {:ok, pid} = TestServerTigris.start_link(user_id: user_id)
+
+      GenServer.call(pid, {:set_counter, 42})
+      GenServer.call(pid, :trigger_sync)
+
+      full_state = GenServer.call(pid, :get_full_state)
+      GenServer.stop(pid)
+
+      {:ok, pid2} = TestServerTigris.start_link(user_id: user_id)
+      state2 = GenServer.call(pid2, :get_state)
+      assert state2.counter == 42
+      GenServer.stop(pid2)
+
+      assert :ok = Durex.delete(TestServerTigris, full_state)
+
+      {:ok, pid3} = TestServerTigris.start_link(user_id: user_id)
+      state3 = GenServer.call(pid3, :get_state)
+      assert state3.counter == 0
+      GenServer.stop(pid3)
+
+      Agent.stop(object_store)
     end
   end
 
@@ -382,4 +471,35 @@ defmodule Durex.IntegrationTest do
       assert {:error, :connection_not_configured} = Store.Redis.delete("some_key")
     end
   end
+
+  @spec tigris_adapter(Agent.agent()) :: (Req.Request.t() -> {Req.Request.t(), Req.Response.t()})
+  defp tigris_adapter(object_store) do
+    fn request ->
+      {request, tigris_response(object_store, request)}
+    end
+  end
+
+  @spec tigris_response(Agent.agent(), Req.Request.t()) :: Req.Response.t()
+  defp tigris_response(object_store, %{method: :put} = request) do
+    headers = Req.Fields.get_list(request.headers)
+    Agent.update(object_store, &Map.put(&1, request.url.path, {request.body, headers}))
+    Req.Response.new(status: 200)
+  end
+
+  defp tigris_response(object_store, %{method: :get} = request) do
+    object_store
+    |> Agent.get(&Map.get(&1, request.url.path))
+    |> tigris_get_response()
+  end
+
+  defp tigris_response(object_store, %{method: :delete} = request) do
+    Agent.update(object_store, &Map.delete(&1, request.url.path))
+    Req.Response.new(status: 204)
+  end
+
+  @spec tigris_get_response({binary(), [{String.t(), String.t()}]} | nil) :: Req.Response.t()
+  defp tigris_get_response(nil), do: Req.Response.new(status: 404)
+
+  defp tigris_get_response({body, headers}),
+    do: Req.Response.new(status: 200, body: body, headers: headers)
 end
