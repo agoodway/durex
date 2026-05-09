@@ -60,7 +60,9 @@ defmodule Durex do
   - `[:durex, :checkpoint, :skipped]` — checkpoint skipped (payload too large or encode failed).
     Metadata: `%{module: module, reason: :payload_too_large | :encode_failed}`.
   - `[:durex, :restore, :ok]` — successful restore.
-    Metadata: `%{module: module, found: boolean}`.
+    Metadata: `%{module: module, found: boolean, recovered: boolean}`.
+    `found: true` when a valid checkpoint was deserialized. `recovered: true`
+    when `restore_conflicted/3` returned recovery data.
   - `[:durex, :restore, :failed]` — restore failed.
     Metadata: `%{module: module, reason: term}`.
   """
@@ -95,6 +97,8 @@ defmodule Durex do
   - `:missing_checkpoint` — no checkpoint exists for the key.
   - `{:version_mismatch, expected, actual}` — stored version differs from the module's configured version.
   - `{:invalid_envelope, decoded}` — stored JSON doesn't match the `%{"v" => _, "d" => _}` envelope.
+    **Security note:** `decoded` contains the raw parsed JSON from the store.
+    If the store is a shared or untrusted resource, treat this data as untrusted input.
   - `{:corrupted_json, reason}` — stored binary is not valid JSON.
   - `{:store_read_error, reason}` — the store returned an error during read.
   """
@@ -111,6 +115,23 @@ defmodule Durex do
   Receives the conflict reason, the fully built checkpoint key, and an options
   keyword list (currently always `[]`). Return a map to recover with that data,
   or `nil` to preserve the default `{:ok, nil}` behavior.
+
+  ## Important
+
+  Maps returned from this callback are used **directly** — they bypass
+  `deserialize/1`. You are responsible for returning data in the format your
+  `init/1` expects (e.g., atom keys if that is what `Map.merge/2` needs).
+
+  Returning any value that is not a map or `nil` raises `ArgumentError`,
+  which will crash the calling process (typically during `init/1`).
+
+  ## State Context
+
+  This callback does not receive the current GenServer state. The `key`
+  argument is the fully built checkpoint key (e.g., `"durex:my_app:MyModule:user_123"`).
+  If you need the original `checkpoint_key` value, extract it from the key
+  or capture it via closure/module attribute in your `init/1` before calling
+  `maybe_restore/2`.
 
   The default implementation injected by `use Durex` returns `nil`.
   """
@@ -298,11 +319,15 @@ defmodule Durex do
       {:ok, binary} ->
         case Durex.Checkpoint.decode_detailed(binary, version) do
           {:ok, data} ->
-            :telemetry.execute([:durex, :restore, :ok], %{}, %{module: module, found: true})
+            :telemetry.execute(
+              [:durex, :restore, :ok],
+              %{},
+              %{module: module, found: true, recovered: false}
+            )
+
             {:ok, module.deserialize(data)}
 
           {:conflict, reason} ->
-            :telemetry.execute([:durex, :restore, :ok], %{}, %{module: module, found: false})
             handle_conflict(module, reason, key)
         end
 
@@ -321,16 +346,23 @@ defmodule Durex do
 
   @spec handle_conflict(module(), restore_conflict_reason(), String.t()) :: {:ok, map() | nil}
   defp handle_conflict(module, reason, key) do
-    result =
-      if function_exported?(module, :restore_conflicted, 3) do
-        module.restore_conflicted(reason, key, [])
-      end
-
-    case result do
+    case module.restore_conflicted(reason, key, []) do
       nil ->
+        :telemetry.execute(
+          [:durex, :restore, :ok],
+          %{},
+          %{module: module, found: false, recovered: false}
+        )
+
         {:ok, nil}
 
       data when is_map(data) ->
+        :telemetry.execute(
+          [:durex, :restore, :ok],
+          %{},
+          %{module: module, found: false, recovered: true}
+        )
+
         {:ok, data}
 
       other ->

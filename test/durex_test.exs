@@ -1,5 +1,5 @@
 defmodule DurexTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
 
   describe "behaviour" do
     test "defines serialize/1, deserialize/1, checkpoint_key/1 callbacks" do
@@ -15,44 +15,44 @@ defmodule DurexTest do
     end
   end
 
+  defmodule DefaultCallbackServer do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.Store.Redis, interval: 5_000, version: 1
+
+    @impl GenServer
+    def init(arg), do: {:ok, arg}
+    @impl Durex
+    def serialize(state), do: state
+    @impl Durex
+    def deserialize(data), do: data
+    @impl Durex
+    def checkpoint_key(_state), do: "test"
+  end
+
+  defmodule OverriddenCallbackServer do
+    @moduledoc false
+    use GenServer
+    use Durex, store: Durex.Store.Redis, interval: 5_000, version: 1
+
+    @impl GenServer
+    def init(arg), do: {:ok, arg}
+    @impl Durex
+    def restore_conflicted(:missing_checkpoint, _key, _opts), do: %{recovered: true}
+    @impl Durex
+    def serialize(state), do: state
+    @impl Durex
+    def deserialize(data), do: data
+    @impl Durex
+    def checkpoint_key(_state), do: "test"
+  end
+
   describe "default restore_conflicted/3" do
-    defmodule DefaultCallbackServer do
-      @moduledoc false
-      use GenServer
-      use Durex, store: Durex.Store.Redis, interval: 5_000, version: 1
-
-      @impl GenServer
-      def init(arg), do: {:ok, arg}
-      @impl Durex
-      def serialize(state), do: state
-      @impl Durex
-      def deserialize(data), do: data
-      @impl Durex
-      def checkpoint_key(_state), do: "test"
-    end
-
     test "default implementation returns nil" do
       assert DefaultCallbackServer.restore_conflicted(:missing_checkpoint, "key", []) == nil
     end
 
     test "can be overridden" do
-      defmodule OverriddenCallbackServer do
-        @moduledoc false
-        use GenServer
-        use Durex, store: Durex.Store.Redis, interval: 5_000, version: 1
-
-        @impl GenServer
-        def init(arg), do: {:ok, arg}
-        @impl Durex
-        def restore_conflicted(:missing_checkpoint, _key, _opts), do: %{recovered: true}
-        @impl Durex
-        def serialize(state), do: state
-        @impl Durex
-        def deserialize(data), do: data
-        @impl Durex
-        def checkpoint_key(_state), do: "test"
-      end
-
       assert OverriddenCallbackServer.restore_conflicted(:missing_checkpoint, "key", []) ==
                %{recovered: true}
     end

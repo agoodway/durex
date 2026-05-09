@@ -247,6 +247,8 @@ end
 
 Return a map to recover with that data, or `nil` to keep the default `{:ok, nil}` behavior. Non-map, non-nil returns raise `ArgumentError`.
 
+> **Note:** Maps returned from `restore_conflicted/3` bypass `deserialize/1` — return data in the format your `init/1` expects.
+
 #### Conflict Reasons
 
 | Reason | When |
@@ -284,7 +286,7 @@ Durex emits telemetry events that you can attach to for monitoring:
 | `[:durex, :checkpoint, :write]` | Successful checkpoint write (includes `:duration`) |
 | `[:durex, :checkpoint, :write_failed]` | Store returned an error (includes `:reason`) |
 | `[:durex, :checkpoint, :skipped]` | Payload too large or encode failed (includes `:reason`) |
-| `[:durex, :restore, :ok]` | Restore completed (includes `:found` boolean). Conflicts emit `found: false` even when `restore_conflicted/3` recovers data. |
+| `[:durex, :restore, :ok]` | Restore completed (includes `:found` and `:recovered` booleans). `found: true` for valid checkpoints. `recovered: true` when `restore_conflicted/3` returned recovery data. |
 | `[:durex, :restore, :failed]` | Store error during restore (includes `:reason`). `restore_conflicted/3` is still called after this event. |
 
 ## Constraints

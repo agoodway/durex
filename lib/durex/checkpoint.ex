@@ -45,31 +45,13 @@ defmodule Durex.Checkpoint do
   Decodes a JSON envelope and checks the version tag.
 
   Returns `{:ok, map}` if version matches, `{:ok, nil}` if version mismatches
-  or data is missing/corrupted.
+  or data is missing/corrupted. Delegates to `decode_detailed/2` internally.
   """
   @spec decode(binary() | nil, pos_integer()) :: {:ok, map() | nil}
-  def decode(nil, _version), do: {:ok, nil}
-
-  def decode(binary, version) when is_binary(binary) do
-    case Jason.decode(binary) do
-      {:ok, %{"v" => ^version, "d" => data}} when is_map(data) ->
-        {:ok, data}
-
-      {:ok, %{"v" => stored_version, "d" => _data}} ->
-        Logger.warning(
-          "[Durex] Version mismatch: stored=#{stored_version}, expected=#{version}. " <>
-            "Discarding stale checkpoint."
-        )
-
-        {:ok, nil}
-
-      {:ok, _data} ->
-        Logger.warning("[Durex] Stored checkpoint has invalid envelope format. Discarding.")
-        {:ok, nil}
-
-      {:error, _reason} ->
-        Logger.warning("[Durex] Failed to decode checkpoint JSON. Discarding corrupted data.")
-        {:ok, nil}
+  def decode(binary, version) do
+    case decode_detailed(binary, version) do
+      {:ok, data} -> {:ok, data}
+      {:conflict, _reason} -> {:ok, nil}
     end
   end
 
