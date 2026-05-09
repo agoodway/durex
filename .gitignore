@@ -28,3 +28,4 @@ durex-*.tar
 # Dependencies (e.g. from embedded tool configs)
 node_modules/
 
+.todos/
