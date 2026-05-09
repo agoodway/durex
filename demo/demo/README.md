@@ -1,21 +1,42 @@
-# Demo
+# Durex Tigris Store Demo
 
-**TODO: Add description**
+Interactive demos showing Durex GenServer state checkpointing with the [Tigris](https://www.tigrisdata.com/) object storage backend.
 
-## Installation
+## Setup
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `demo` to your list of dependencies in `mix.exs`:
+1. Clone the repo and navigate to the demo directory:
 
-```elixir
-def deps do
-  [
-    {:demo, "~> 0.1.0"}
-  ]
-end
+```bash
+git clone git@github.com:agoodway/durex.git
+cd durex/demo/demo
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/demo>.
+2. Copy the environment template and fill in your Tigris credentials:
 
+```bash
+cp .env.sample .env
+```
+
+3. Install dependencies:
+
+```bash
+mix deps.get
+```
+
+## Demo Scripts
+
+### Lifecycle Walkthrough
+
+A scripted walkthrough of the full Durex lifecycle: start, modify state, checkpoint, crash, restore, and delete.
+
+```bash
+mix run priv/demo.exs
+```
+
+### Auto Counter
+
+A long-running GenServer that increments a counter every second and checkpoints to Tigris automatically. Kill it with Ctrl-C, restart, and watch the counter resume from its last checkpoint.
+
+```bash
+mix run priv/auto_counter.exs
+```
